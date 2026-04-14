@@ -1,0 +1,22 @@
+[project]
+name = "transcribe-app"
+version = "0.1.0"
+description = "Local Swedish meeting transcriber (faster-whisper, Tkinter)"
+readme = "README.md"
+authors = [
+    { name = "Lars Lindberg", email = "lars.lindberg@herrljunga.se" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "faster-whisper>=1.0.3",
+    "sounddevice>=0.4.7",
+    "numpy>=1.26",
+]
+
+[project.scripts]
+transcribe-app = "transcribe_app.main:main"
+download-model = "transcribe_app.download_model:main"
+
+[build-system]
+requires = ["uv_build>=0.11.6,<0.12.0"]
+build-backend = "uv_build"
