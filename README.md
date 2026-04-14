@@ -1,0 +1,1 @@
+Simpel Transkriberings App (faster-whisper, Tkinter)

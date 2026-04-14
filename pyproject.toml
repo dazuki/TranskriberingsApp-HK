@@ -1,7 +1,7 @@
 [project]
 name = "transcribe-app"
 version = "0.1.0"
-description = "Local Swedish meeting transcriber (faster-whisper, Tkinter)"
+description = "Simpel Transkriberings App (faster-whisper, Tkinter)"
 readme = "README.md"
 authors = [
     { name = "Lars Lindberg", email = "lars.lindberg@herrljunga.se" }

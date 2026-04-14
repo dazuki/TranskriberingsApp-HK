@@ -18,14 +18,8 @@ class Transcriber:
         self.model = WhisperModel(str(MODEL_DIR), device="cpu", compute_type="int8")
 
     def transcribe(self, audio_path: Path) -> Iterator[tuple[float, float, str]]:
-        # VAD tuned less aggressively than defaults:
-        #   threshold 0.3 (vs 0.5) — keeps quiet speech that Intel Smart Sound
-        #     noise suppression would otherwise drop below the VAD floor.
-        #   speech_pad_ms 800 (vs 400) — don't clip word edges as speech fades.
-        #   min_silence_duration_ms 1000 (vs 2000) — still split on real pauses
-        #     but don't let long silences merge into one giant segment.
-        # condition_on_previous_text=False prevents context-driven dropouts
-        # and hallucinations that kick in after short or noisy segments.
+        # Lower VAD threshold keeps quiet speech that Intel Smart Sound noise
+        # suppression drops below the default 0.5 floor.
         segments, _info = self.model.transcribe(
             str(audio_path),
             language=LANGUAGE,

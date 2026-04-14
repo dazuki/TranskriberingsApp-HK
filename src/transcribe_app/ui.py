@@ -9,7 +9,12 @@ from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 
 from .config import TRANSCRIPTS_DIR
-from .download_model import ensure_model, is_model_present
+from .download_model import (
+    cleanup_partial_download,
+    ensure_model,
+    is_model_present,
+    preflight_check,
+)
 from .recorder import Recorder, list_input_devices
 from .transcriber import Transcriber
 
@@ -75,7 +80,6 @@ class App:
             self.status_var.set("Inga mikrofoner hittades")
             return
         self.record_btn.configure(state=tk.NORMAL)
-        # Prefer the "(default)" entry, otherwise pick the first.
         default_idx = next(
             (i for i, (_, label) in enumerate(self._devices) if "(default)" in label),
             0,
@@ -143,10 +147,12 @@ class App:
 
     def _download_model_worker(self) -> None:
         try:
+            preflight_check()
             ensure_model()
         except Exception as exc:
-            err = str(exc)
-            self.root.after(0, self._on_model_download_error, err)
+            cleanup_partial_download()
+            title, body = _classify_download_error(exc)
+            self.root.after(0, self._on_model_download_error, title, body)
             return
         self.root.after(0, self._on_model_download_done)
 
@@ -157,18 +163,13 @@ class App:
         self._set_button_to_record_mode()
         self.status_var.set("Modell nedladdad - redo")
 
-    def _on_model_download_error(self, err: str) -> None:
+    def _on_model_download_error(self, title: str, body: str) -> None:
         self.progress.stop()
         self.device_combo.configure(state="readonly")
         self.refresh_btn.configure(state=tk.NORMAL)
         self._set_button_to_download_mode()
         self.status_var.set("Kunde inte ladda ner modellen")
-        messagebox.showerror(
-            "Nedladdningsfel",
-            "Modellen kunde inte laddas ner. Kontrollera internetanslutningen "
-            "och försök igen, eller kör `uv run download-model` manuellt.\n\n"
-            f"Detaljer: {err}",
-        )
+        messagebox.showerror(title, body)
 
     def toggle_record(self) -> None:
         if not self.recording:
@@ -243,7 +244,6 @@ class App:
         TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
         out_path = TRANSCRIPTS_DIR / (audio_path.stem + ".txt")
         out_path.write_text(content, encoding="utf-8")
-        # Keep a copy of the WAV next to the transcript for debugging/playback.
         wav_copy = TRANSCRIPTS_DIR / audio_path.name
         try:
             shutil.copy2(audio_path, wav_copy)
@@ -270,6 +270,75 @@ class App:
 def _fmt(seconds: float) -> str:
     m, s = divmod(int(seconds), 60)
     return f"{m:02d}:{s:02d}"
+
+
+def _classify_download_error(exc: Exception) -> tuple[str, str]:
+    msg = str(exc).lower()
+    raw = str(exc)
+    proxy_hint = (
+        "\n\nTips: Om du är på kommunens nätverk kan en proxy krävas. "
+        "Kontrollera att miljövariablerna HTTPS_PROXY och HTTP_PROXY "
+        "är korrekt inställda innan du startar appen."
+    )
+
+    if "proxy" in msg:
+        return (
+            "Proxyfel",
+            "Proxyservern kunde inte nås eller svarade med ett fel. "
+            "Kontrollera miljövariablerna HTTPS_PROXY och HTTP_PROXY, "
+            "eller kontakta IT-avdelningen."
+            f"\n\nDetaljer: {raw}",
+        )
+
+    if "ssl" in msg or "cert" in msg or "certificate" in msg:
+        return (
+            "SSL- eller certifikatfel",
+            "Det uppstod ett SSL- eller certifikatfel vid anslutning till "
+            "huggingface.co. Detta händer ofta när kommunens proxy gör "
+            "SSL-inspection. Kontakta IT-avdelningen eller kontrollera att "
+            "rätt rot-certifikat är installerat."
+            f"\n\nDetaljer: {raw}",
+        )
+
+    if any(
+        token in msg
+        for token in (
+            "name or service not known",
+            "nameresolutionerror",
+            "temporary failure in name resolution",
+            "getaddrinfo",
+            "connection refused",
+            "connection reset",
+            "no route",
+            "unreachable",
+            "timed out",
+            "timeout",
+            "urlopen error",
+            "connection error",
+        )
+    ):
+        return (
+            "Ingen anslutning",
+            "Kunde inte ansluta till huggingface.co. Kontrollera att datorn "
+            "har internetanslutning och försök igen." + proxy_hint + f"\n\nDetaljer: {raw}",
+        )
+
+    if isinstance(exc, OSError):
+        return (
+            "Diskfel",
+            "Kunde inte skriva modellfiler till disk. Kontrollera att det "
+            "finns minst 2 GB ledigt utrymme och att du har skrivrättigheter "
+            "till projektmappen."
+            f"\n\nDetaljer: {raw}",
+        )
+
+    return (
+        "Nedladdningsfel",
+        "Modellen kunde inte laddas ner. Försök igen, eller kör "
+        "`uv run download-model` manuellt från ett terminalfönster."
+        + proxy_hint
+        + f"\n\nDetaljer: {raw}",
+    )
 
 
 def run() -> None:

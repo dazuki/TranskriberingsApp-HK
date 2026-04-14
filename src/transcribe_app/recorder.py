@@ -10,19 +10,12 @@ import sounddevice as sd
 
 from .config import CHANNELS, SAMPLE_RATE
 
-# Host APIs in display priority: DirectSound first because it resamples
-# transparently (we record at 16 kHz), then WASAPI at native rate, then MME
-# as fallback. WDM-KS is excluded entirely — it surfaces output devices
-# (speakers) as loopback-capable input entries, which we don't want.
+# WDM-KS is blocked because it surfaces speakers as loopback-capable inputs.
 _HOSTAPI_PRIORITY = ("Windows DirectSound", "Windows WASAPI", "MME", "Core Audio", "ALSA")
 _HOSTAPI_BLOCKLIST = ("Windows WDM-KS",)
 
-# Names that indicate loopback/output devices even when the host API reports
-# them as input-capable. Matched case-insensitively, Swedish + English.
 _OUTPUT_NAME_HINTS = ("output", "högtalare", "hogtalare", "speaker", "stereo mix", "stereomix")
 
-# Legacy "default routing" wrapper entries — not real devices, just proxies
-# for whatever Windows considers the current default input.
 _WRAPPER_NAME_HINTS = (
     "microsoft sound mapper",
     "primär drivrutin för ljudinfångst",
@@ -32,7 +25,6 @@ _WRAPPER_NAME_HINTS = (
 
 
 def _is_usable_input(device_index: int, channels: int) -> tuple[bool, float | None]:
-    """Return (usable, sample_rate). Tries our target rate first, then native."""
     target_rate = SAMPLE_RATE
     try:
         sd.check_input_settings(
@@ -41,7 +33,7 @@ def _is_usable_input(device_index: int, channels: int) -> tuple[bool, float | No
         return True, target_rate
     except Exception:
         pass
-    # Fall back to device's native rate (WASAPI is strict about this).
+    # WASAPI is strict — fall back to the device's native rate.
     try:
         info = sd.query_devices(device_index)
         native = float(info["default_samplerate"])
@@ -54,7 +46,7 @@ def _is_usable_input(device_index: int, channels: int) -> tuple[bool, float | No
 
 
 def _same_device(a: str, b: str) -> bool:
-    """Prefix match to handle MME's 31-char name truncation."""
+    # MME truncates device names to 31 chars, so prefix-match.
     a, b = a.lower().strip(), b.lower().strip()
     if a == b:
         return True
@@ -65,7 +57,6 @@ def _same_device(a: str, b: str) -> bool:
 def list_input_devices(
     sample_rate: int = SAMPLE_RATE, channels: int = CHANNELS
 ) -> list[tuple[int, str]]:
-    """Return (device_index, label) for real input devices that can record at our settings."""
     devices = sd.query_devices()
     try:
         default_in = sd.default.device[0]
@@ -73,8 +64,7 @@ def list_input_devices(
     except (TypeError, IndexError):
         default_name = None
 
-    # Build a sortable list of candidates, then dedupe by prefix.
-    candidates: list[tuple[int, int, str, str]] = []  # (priority, idx, name, host)
+    candidates: list[tuple[int, int, str, str]] = []
     for idx, dev in enumerate(devices):
         if dev.get("max_input_channels", 0) <= 0:
             continue
@@ -95,11 +85,8 @@ def list_input_devices(
         )
         candidates.append((priority, idx, name, host))
 
-    candidates.sort(key=lambda c: c[0])  # best host API first
+    candidates.sort(key=lambda c: c[0])
 
-    # Prefix-based dedupe: keep the first (highest-priority) entry for each
-    # physical device, skipping later entries whose names are prefixes of
-    # or prefixed by an already-kept name.
     kept: list[tuple[int, str, str]] = []
     for _priority, idx, name, host in candidates:
         if any(_same_device(name, k_name) for _, k_name, _ in kept):
@@ -165,7 +152,6 @@ class Recorder:
             self._collector.join()
             self._collector = None
 
-        # Drain any leftover queued frames.
         while not self._queue.empty():
             self._chunks.append(self._queue.get_nowait())
 
@@ -176,7 +162,7 @@ class Recorder:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with wave.open(str(output_path), "wb") as wf:
             wf.setnchannels(self.channels)
-            wf.setsampwidth(2)  # int16
+            wf.setsampwidth(2)
             wf.setframerate(self.sample_rate)
             wf.writeframes(audio.tobytes())
         return output_path
