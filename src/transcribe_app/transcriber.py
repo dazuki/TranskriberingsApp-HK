@@ -17,10 +17,10 @@ class Transcriber:
             )
         self.model = WhisperModel(str(MODEL_DIR), device="cpu", compute_type="int8")
 
-    def transcribe(self, audio_path: Path) -> Iterator[tuple[float, float, str]]:
+    def transcribe(self, audio_path: Path) -> tuple[float, Iterator[tuple[float, float, str]]]:
         # Lower VAD threshold keeps quiet speech that Intel Smart Sound noise
         # suppression drops below the default 0.5 floor.
-        segments, _info = self.model.transcribe(
+        segments, info = self.model.transcribe(
             str(audio_path),
             language=LANGUAGE,
             beam_size=5,
@@ -32,5 +32,9 @@ class Transcriber:
             },
             condition_on_previous_text=False,
         )
-        for seg in segments:
-            yield seg.start, seg.end, seg.text.strip()
+
+        def _iter() -> Iterator[tuple[float, float, str]]:
+            for seg in segments:
+                yield seg.start, seg.end, seg.text.strip()
+
+        return info.duration, _iter()

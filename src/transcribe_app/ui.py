@@ -6,7 +6,7 @@ import tempfile
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from .config import TRANSCRIPTS_DIR
 from .download_model import (
@@ -59,11 +59,21 @@ class App:
         self.record_btn = ttk.Button(controls, text="● Spela in", command=self.toggle_record)
         self.record_btn.pack(side=tk.LEFT)
 
+        self.file_btn = ttk.Button(
+            controls,
+            text="Välj ljudfil för transkribering...",
+            command=self.pick_file_and_transcribe,
+        )
+        self.file_btn.pack(side=tk.LEFT, padx=(6, 0))
+
         self.status_var = tk.StringVar(value="Redo")
         ttk.Label(controls, textvariable=self.status_var).pack(side=tk.LEFT, padx=12)
 
-        self.progress = ttk.Progressbar(controls, mode="indeterminate", length=160)
-        self.progress.pack(side=tk.RIGHT)
+        self.spinner_label = ttk.Label(controls, text="", font=("Consolas", 14), width=2)
+        self.spinner_label.pack(side=tk.RIGHT)
+        self._spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        self._spinner_idx = 0
+        self._spinner_job: str | None = None
 
         ttk.Separator(frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
 
@@ -106,6 +116,7 @@ class App:
             state=tk.NORMAL,
             command=self._prompt_and_download_model,
         )
+        self.file_btn.configure(state=tk.DISABLED)
 
     def _set_button_to_record_mode(self) -> None:
         self.record_btn.configure(
@@ -113,6 +124,7 @@ class App:
             state=tk.NORMAL if self._devices else tk.DISABLED,
             command=self.toggle_record,
         )
+        self.file_btn.configure(state=tk.NORMAL)
 
     def _prompt_and_download_model(self) -> None:
         proceed = messagebox.askyesno(
@@ -139,10 +151,11 @@ class App:
             self.status_var.set("Nedladdning avbruten - klicka på knappen för att försöka igen")
             return
         self.record_btn.configure(state=tk.DISABLED)
+        self.file_btn.configure(state=tk.DISABLED)
         self.device_combo.configure(state=tk.DISABLED)
         self.refresh_btn.configure(state=tk.DISABLED)
         self.status_var.set("Laddar ner modell (~1,4 GB)...")
-        self.progress.start(12)
+        self._spinner_start()
         threading.Thread(target=self._download_model_worker, daemon=True).start()
 
     def _download_model_worker(self) -> None:
@@ -157,14 +170,14 @@ class App:
         self.root.after(0, self._on_model_download_done)
 
     def _on_model_download_done(self) -> None:
-        self.progress.stop()
+        self._spinner_stop()
         self.device_combo.configure(state="readonly")
         self.refresh_btn.configure(state=tk.NORMAL)
         self._set_button_to_record_mode()
         self.status_var.set("Modell nedladdad - redo")
 
     def _on_model_download_error(self, title: str, body: str) -> None:
-        self.progress.stop()
+        self._spinner_stop()
         self.device_combo.configure(state="readonly")
         self.refresh_btn.configure(state=tk.NORMAL)
         self._set_button_to_download_mode()
@@ -186,6 +199,7 @@ class App:
             return
         self.recording = True
         self.record_btn.configure(text="■ Stoppa")
+        self.file_btn.configure(state=tk.DISABLED)
         self.device_combo.configure(state=tk.DISABLED)
         self.refresh_btn.configure(state=tk.DISABLED)
         self.status_var.set("Spelar in...")
@@ -205,66 +219,163 @@ class App:
         except Exception as exc:
             messagebox.showerror("Inspelningsfel", str(exc))
             self.record_btn.configure(state=tk.NORMAL)
+            self.file_btn.configure(state=tk.NORMAL)
             self.device_combo.configure(state="readonly")
             self.refresh_btn.configure(state=tk.NORMAL)
             self.status_var.set("Redo")
             return
 
+        transcribe_now = messagebox.askyesno(
+            "Transkribera inspelningen?",
+            (
+                "Inspelningen är klar.\n\n"
+                "Vill du transkribera den nu?\n\n"
+                "Om du svarar Nej sparas ljudfilen och du kan transkribera "
+                "den senare via 'Välj ljudfil för transkribering...'."
+            ),
+            icon=messagebox.QUESTION,
+        )
+
+        if not transcribe_now:
+            saved_path = self._keep_recording(self.audio_path)
+            self.record_btn.configure(state=tk.NORMAL)
+            self.file_btn.configure(state=tk.NORMAL)
+            self.device_combo.configure(state="readonly")
+            self.refresh_btn.configure(state=tk.NORMAL)
+            self.status_var.set(f"Ljudfil sparad: {saved_path}")
+            return
+
+        self._show_transcription_placeholder()
         self.status_var.set("Transkriberar (detta kan ta en stund)...")
-        self.progress.start(12)
+        self._spinner_start()
         threading.Thread(
-            target=self._run_transcription, args=(self.audio_path,), daemon=True
+            target=self._run_transcription, args=(self.audio_path, True), daemon=True
         ).start()
 
-    def _run_transcription(self, audio_path: Path) -> None:
+    def _keep_recording(self, wav_path: Path) -> Path:
+        TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+        dest = TRANSCRIPTS_DIR / wav_path.name
+        try:
+            shutil.copy2(wav_path, dest)
+        except OSError as exc:
+            print(f"[ui] failed to copy WAV to transcripts dir: {exc}")
+            return wav_path
+        return dest
+
+    def pick_file_and_transcribe(self) -> None:
+        path_str = filedialog.askopenfilename(
+            title="Välj ljudfil",
+            filetypes=[
+                ("Ljudfiler", "*.wav *.mp3 *.m4a *.mp4 *.ogg *.oga *.flac *.webm *.aac *.wma"),
+                ("Alla filer", "*.*"),
+            ],
+        )
+        if not path_str:
+            return
+        audio_path = Path(path_str)
+        if not audio_path.is_file():
+            messagebox.showerror("Filfel", f"Filen kunde inte läsas: {audio_path}")
+            return
+
+        self.audio_path = audio_path
+        self.record_btn.configure(state=tk.DISABLED)
+        self.file_btn.configure(state=tk.DISABLED)
+        self.device_combo.configure(state=tk.DISABLED)
+        self.refresh_btn.configure(state=tk.DISABLED)
+        self._show_transcription_placeholder()
+        self.status_var.set("Transkriberar (detta kan ta en stund)...")
+        self._spinner_start()
+        threading.Thread(
+            target=self._run_transcription, args=(audio_path, False), daemon=True
+        ).start()
+
+    def _run_transcription(self, audio_path: Path, copy_audio: bool) -> None:
         try:
             if self.transcriber is None:
                 self.root.after(0, lambda: self.status_var.set("Laddar modell..."))
                 self.transcriber = Transcriber()
-                self.root.after(0, lambda: self.status_var.set("Transkriberar..."))
+            self.root.after(0, lambda: self.status_var.set("Analyserar ljud..."))
+
+            duration, segments = self.transcriber.transcribe(audio_path)
+            self.root.after(0, self._on_transcription_started, duration)
 
             lines: list[str] = []
-            for start, end, text in self.transcriber.transcribe(audio_path):
+            for start, end, text in segments:
                 line = f"[{_fmt(start)} -> {_fmt(end)}] {text}"
                 lines.append(line)
-                self.root.after(0, self._append_line, line)
+                pct = min(100, int((end / duration) * 100)) if duration > 0 else 0
+                self.root.after(0, self._append_line_with_progress, line, pct)
 
             full_text = "\n".join(lines)
-            out_path = self._save_transcript(audio_path, full_text)
+            out_path = self._save_transcript(audio_path, full_text, copy_audio=copy_audio)
             self.root.after(0, self._on_done, out_path)
         except Exception as exc:
             err = str(exc)
             self.root.after(0, self._on_error, err)
 
-    def _append_line(self, line: str) -> None:
+    def _show_transcription_placeholder(self) -> None:
+        self.text.delete("1.0", tk.END)
+        self.text.insert(
+            "1.0",
+            "Förbereder transkribering, vänta...\n"
+            "(Modellen laddas och ljudet analyseras innan text visas här.)\n",
+        )
+
+    def _on_transcription_started(self, duration: float) -> None:
+        self.text.delete("1.0", tk.END)
+        self.status_var.set(f"Transkriberar 0% (0:00 / {_fmt(duration)})")
+
+    def _append_line_with_progress(self, line: str, pct: int) -> None:
         self.text.insert(tk.END, line + "\n")
         self.text.see(tk.END)
+        self.status_var.set(f"Transkriberar {pct}%")
 
-    def _save_transcript(self, audio_path: Path, content: str) -> Path:
+    def _save_transcript(self, audio_path: Path, content: str, *, copy_audio: bool) -> Path:
         TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
         out_path = TRANSCRIPTS_DIR / (audio_path.stem + ".txt")
         out_path.write_text(content, encoding="utf-8")
-        wav_copy = TRANSCRIPTS_DIR / audio_path.name
-        try:
-            shutil.copy2(audio_path, wav_copy)
-        except OSError as exc:
-            print(f"[ui] failed to copy WAV to transcripts dir: {exc}")
+        if copy_audio:
+            wav_copy = TRANSCRIPTS_DIR / audio_path.name
+            try:
+                shutil.copy2(audio_path, wav_copy)
+            except OSError as exc:
+                print(f"[ui] failed to copy WAV to transcripts dir: {exc}")
         return out_path
 
     def _on_done(self, out_path: Path) -> None:
-        self.progress.stop()
+        self._spinner_stop()
         self.record_btn.configure(state=tk.NORMAL)
+        self.file_btn.configure(state=tk.NORMAL)
         self.device_combo.configure(state="readonly")
         self.refresh_btn.configure(state=tk.NORMAL)
         self.status_var.set(f"Sparad: {out_path}")
 
     def _on_error(self, err: str) -> None:
-        self.progress.stop()
+        self._spinner_stop()
         self.record_btn.configure(state=tk.NORMAL)
+        self.file_btn.configure(state=tk.NORMAL)
         self.device_combo.configure(state="readonly")
         self.refresh_btn.configure(state=tk.NORMAL)
         self.status_var.set("Fel")
         messagebox.showerror("Transkriberingsfel", err)
+
+    def _spinner_start(self) -> None:
+        if self._spinner_job is not None:
+            return
+        self._spinner_idx = 0
+        self._spinner_tick()
+
+    def _spinner_stop(self) -> None:
+        if self._spinner_job is not None:
+            self.root.after_cancel(self._spinner_job)
+            self._spinner_job = None
+        self.spinner_label.configure(text="")
+
+    def _spinner_tick(self) -> None:
+        frame = self._spinner_frames[self._spinner_idx % len(self._spinner_frames)]
+        self.spinner_label.configure(text=frame)
+        self._spinner_idx += 1
+        self._spinner_job = self.root.after(80, self._spinner_tick)
 
 
 def _fmt(seconds: float) -> str:
