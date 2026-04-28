@@ -149,6 +149,7 @@ class App:
             from_=0,
             to=100,
             command=self._on_seek_drag,
+            state=tk.DISABLED,
         )
         self.seek_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.seek_scale.bind("<ButtonPress-1>", self._on_seek_press)
@@ -324,6 +325,7 @@ class App:
             self.device_combo.configure(state="readonly")
             self.refresh_btn.configure(state=tk.NORMAL)
             self._refresh_file_list()
+            self._auto_select_stem(saved_path.stem)
             self.status_var.set(f"Ljudfil sparad: {saved_path}")
             return
 
@@ -441,6 +443,9 @@ class App:
         for p in self._wav_paths:
             marker = "" if (TRANSCRIPTS_DIR / (p.stem + ".txt")).exists() else " *"
             self.file_list.insert(tk.END, p.stem + marker)
+        self.play_btn.configure(state=tk.DISABLED)
+        self.delete_btn.configure(state=tk.DISABLED)
+        self.seek_scale.configure(state=tk.DISABLED)
 
     def _on_file_select(self, _event: object) -> None:
         self._stop_playback()
@@ -457,6 +462,7 @@ class App:
             self.status_var.set(f"Ingen transkription hittad for {wav_path.name}")
         self.play_btn.configure(state=tk.NORMAL)
         self.delete_btn.configure(state=tk.NORMAL)
+        self.seek_scale.configure(state=tk.NORMAL)
 
     def _delete_selected(self) -> None:
         sel = self.file_list.curselection()
@@ -612,6 +618,17 @@ class App:
                 self.text.see(f"{i}.0")
                 return
 
+    def _auto_select_stem(self, stem: str) -> None:
+        for i, p in enumerate(self._wav_paths):
+            if p.stem == stem:
+                self.file_list.selection_clear(0, tk.END)
+                self.file_list.selection_set(i)
+                self.file_list.see(i)
+                self.play_btn.configure(state=tk.NORMAL)
+                self.delete_btn.configure(state=tk.NORMAL)
+                self.seek_scale.configure(state=tk.NORMAL)
+                break
+
     def _on_done(self, out_path: Path) -> None:
         self._spinner_stop()
         self.record_btn.configure(state=tk.NORMAL)
@@ -619,6 +636,7 @@ class App:
         self.device_combo.configure(state="readonly")
         self.refresh_btn.configure(state=tk.NORMAL)
         self._refresh_file_list()
+        self._auto_select_stem(out_path.stem)
         self.status_var.set(f"Sparad: {out_path}")
 
     def _on_error(self, err: str) -> None:
