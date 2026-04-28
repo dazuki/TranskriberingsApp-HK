@@ -37,9 +37,14 @@ class App:
         self.audio_path: Path | None = None
         self._devices: list[tuple[int, str]] = []
         self._wav_paths: list[Path] = []
-        self._playback_start: float | None = None
+        self._playback_audio: np.ndarray | None = None
+        self._playback_sr: int = 16000
         self._playback_duration: float = 0.0
+        self._playback_elapsed: float = 0.0
+        self._playback_start: float | None = None
+        self._playback_paused: bool = False
         self._playback_job: str | None = None
+        self._seek_dragging: bool = False
 
         self._build_ui()
         self._refresh_devices()
@@ -88,12 +93,14 @@ class App:
 
         ttk.Separator(frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
 
-        content_pane = ttk.PanedWindow(frame, orient=tk.HORIZONTAL)
-        content_pane.pack(fill=tk.BOTH, expand=True)
-        self.root.after(50, lambda: content_pane.sashpos(0, 320))
+        left_frame = ttk.Frame(frame, width=320)
+        left_frame.pack(side=tk.LEFT, fill=tk.Y)
+        left_frame.pack_propagate(False)
 
-        left_frame = ttk.Frame(content_pane, width=320)
-        content_pane.add(left_frame, weight=0)
+        ttk.Separator(frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
+
+        right_frame = ttk.Frame(frame)
+        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         list_header = ttk.Frame(left_frame)
         list_header.pack(fill=tk.X)
@@ -123,15 +130,33 @@ class App:
             play_row, text="▶ Spela upp", command=self._play_selected, state=tk.DISABLED
         )
         self.play_btn.pack(side=tk.LEFT)
-        self.time_label = ttk.Label(play_row, text="", font=("Segoe UI", 9))
-        self.time_label.pack(side=tk.LEFT, padx=(6, 0))
-
-        right_frame = ttk.Frame(content_pane)
-        content_pane.add(right_frame, weight=1)
+        self.delete_btn = ttk.Button(
+            play_row, text="Ta bort", command=self._delete_selected, state=tk.DISABLED
+        )
+        self.delete_btn.pack(side=tk.LEFT, padx=(6, 0))
 
         self.text = scrolledtext.ScrolledText(right_frame, wrap=tk.WORD, font=("Segoe UI", 11))
         self.text.pack(fill=tk.BOTH, expand=True)
         self.text.tag_configure("current_line", background="#fff3b0")
+
+        seek_frame = ttk.Frame(right_frame)
+        seek_frame.pack(fill=tk.X, pady=(4, 0))
+        self.seek_var = tk.DoubleVar(value=0.0)
+        self.seek_scale = ttk.Scale(
+            seek_frame,
+            orient=tk.HORIZONTAL,
+            variable=self.seek_var,
+            from_=0,
+            to=100,
+            command=self._on_seek_drag,
+        )
+        self.seek_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.seek_scale.bind("<ButtonPress-1>", self._on_seek_press)
+        self.seek_scale.bind("<ButtonRelease-1>", self._on_seek_release)
+        self.time_label = ttk.Label(
+            seek_frame, text="", font=("Segoe UI", 9), width=13, anchor=tk.E
+        )
+        self.time_label.pack(side=tk.RIGHT)
 
     def _refresh_devices(self) -> None:
         self._devices = list_input_devices()
@@ -256,6 +281,8 @@ class App:
         self.file_btn.configure(state=tk.DISABLED)
         self.device_combo.configure(state=tk.DISABLED)
         self.refresh_btn.configure(state=tk.DISABLED)
+        self.play_btn.configure(state=tk.DISABLED)
+        self.delete_btn.configure(state=tk.DISABLED)
         self.status_var.set("Spelar in...")
         self.text.delete("1.0", tk.END)
 
@@ -296,10 +323,13 @@ class App:
             self.file_btn.configure(state=tk.NORMAL)
             self.device_combo.configure(state="readonly")
             self.refresh_btn.configure(state=tk.NORMAL)
+            self._refresh_file_list()
             self.status_var.set(f"Ljudfil sparad: {saved_path}")
             return
 
         self._show_transcription_placeholder()
+        self.play_btn.configure(state=tk.DISABLED)
+        self.delete_btn.configure(state=tk.DISABLED)
         self.status_var.set("Transkriberar (detta kan ta en stund)...")
         self._spinner_start()
         threading.Thread(
@@ -336,11 +366,13 @@ class App:
         self.file_btn.configure(state=tk.DISABLED)
         self.device_combo.configure(state=tk.DISABLED)
         self.refresh_btn.configure(state=tk.DISABLED)
+        self.play_btn.configure(state=tk.DISABLED)
+        self.delete_btn.configure(state=tk.DISABLED)
         self._show_transcription_placeholder()
         self.status_var.set("Transkriberar (detta kan ta en stund)...")
         self._spinner_start()
         threading.Thread(
-            target=self._run_transcription, args=(audio_path, False), daemon=True
+            target=self._run_transcription, args=(audio_path, True), daemon=True
         ).start()
 
     def _run_transcription(self, audio_path: Path, copy_audio: bool) -> None:
@@ -390,10 +422,11 @@ class App:
         out_path.write_text(content, encoding="utf-8")
         if copy_audio:
             wav_copy = TRANSCRIPTS_DIR / audio_path.name
-            try:
-                shutil.copy2(audio_path, wav_copy)
-            except OSError as exc:
-                print(f"[ui] failed to copy WAV to transcripts dir: {exc}")
+            if wav_copy != audio_path:
+                try:
+                    shutil.copy2(audio_path, wav_copy)
+                except OSError as exc:
+                    print(f"[ui] failed to copy WAV to transcripts dir: {exc}")
         return out_path
 
     def _refresh_file_list(self) -> None:
@@ -423,11 +456,51 @@ class App:
         else:
             self.status_var.set(f"Ingen transkription hittad for {wav_path.name}")
         self.play_btn.configure(state=tk.NORMAL)
+        self.delete_btn.configure(state=tk.NORMAL)
+
+    def _delete_selected(self) -> None:
+        sel = self.file_list.curselection()
+        if not sel:
+            return
+        wav_path = self._wav_paths[sel[0]]
+        txt_path = TRANSCRIPTS_DIR / (wav_path.stem + ".txt")
+        if not messagebox.askyesno(
+            "Ta bort inspelning",
+            f"Ta bort '{wav_path.stem}' och tillhörande transkription?\n\nDetta kan inte ångras.",
+            icon=messagebox.WARNING,
+        ):
+            return
+        self._stop_playback()
+        for path in (wav_path, txt_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                messagebox.showerror("Fel", f"Kunde inte ta bort {path.name}: {exc}")
+                return
+        self.text.delete("1.0", tk.END)
+        self.play_btn.configure(state=tk.DISABLED)
+        self.delete_btn.configure(state=tk.DISABLED)
+        self.status_var.set(f"Borttagen: {wav_path.stem}")
+        self._refresh_file_list()
 
     def _play_selected(self) -> None:
-        if self._playback_start is not None:
-            self._stop_playback()
+        if self._playback_paused:
+            self._start_playback_from(self._playback_elapsed)
+            self.play_btn.configure(text="⏸ Pausa")
+            self._playback_tick()
             return
+        if self._playback_start is not None:
+            # Pause
+            sd.stop()
+            if self._playback_job is not None:
+                self.root.after_cancel(self._playback_job)
+                self._playback_job = None
+            self._playback_elapsed = self._current_pos()
+            self._playback_start = None
+            self._playback_paused = True
+            self.play_btn.configure(text="▶ Fortsätt")
+            return
+        # Fresh load
         sel = self.file_list.curselection()
         if not sel:
             return
@@ -446,32 +519,82 @@ class App:
         audio = np.frombuffer(frames, dtype=dtype)
         if nc > 1:
             audio = audio.reshape(-1, nc)
+        self._playback_audio = audio
+        self._playback_sr = sr
         self._playback_duration = n_frames / sr
-        sd.play(audio, samplerate=sr)
-        self._playback_start = time.monotonic()
-        self.play_btn.configure(text="■ Stoppa")
+        self._playback_elapsed = 0.0
+        self.seek_scale.configure(to=self._playback_duration)
+        self.seek_var.set(0)
+        self._start_playback_from(0.0)
+        self.play_btn.configure(text="⏸ Pausa")
         self._playback_tick()
+
+    def _start_playback_from(self, pos: float) -> None:
+        if self._playback_audio is None:
+            return
+        sample_offset = int(pos * self._playback_sr)
+        audio = self._playback_audio
+        sliced = audio[sample_offset:] if audio.ndim == 1 else audio[sample_offset:, :]
+        sd.play(sliced, samplerate=self._playback_sr)
+        self._playback_elapsed = pos
+        self._playback_start = time.monotonic()
+        self._playback_paused = False
+
+    def _current_pos(self) -> float:
+        if self._playback_start is None:
+            return self._playback_elapsed
+        return self._playback_elapsed + (time.monotonic() - self._playback_start)
 
     def _stop_playback(self) -> None:
         sd.stop()
         if self._playback_job is not None:
             self.root.after_cancel(self._playback_job)
             self._playback_job = None
+        self._playback_audio = None
         self._playback_start = None
+        self._playback_elapsed = 0.0
+        self._playback_paused = False
         self.time_label.configure(text="")
+        self.seek_var.set(0)
         self.text.tag_remove("current_line", "1.0", tk.END)
         self.play_btn.configure(text="▶ Spela upp")
 
     def _playback_tick(self) -> None:
         if self._playback_start is None:
             return
-        elapsed = time.monotonic() - self._playback_start
-        if elapsed >= self._playback_duration:
+        pos = self._current_pos()
+        if pos >= self._playback_duration:
             self._stop_playback()
             return
-        self.time_label.configure(text=f"{_fmt(elapsed)} / {_fmt(self._playback_duration)}")
-        self._highlight_current_line(elapsed)
+        if not self._seek_dragging:
+            self.seek_var.set(pos)
+        self.time_label.configure(text=f"{_fmt(pos)} / {_fmt(self._playback_duration)}")
+        self._highlight_current_line(pos)
         self._playback_job = self.root.after(100, self._playback_tick)
+
+    def _on_seek_drag(self, value: str) -> None:
+        if self._seek_dragging:
+            self.time_label.configure(
+                text=f"{_fmt(float(value))} / {_fmt(self._playback_duration)}"
+            )
+
+    def _on_seek_press(self, _event: object) -> None:
+        self._seek_dragging = True
+
+    def _on_seek_release(self, _event: object) -> None:
+        self._seek_dragging = False
+        pos = min(self.seek_var.get(), self._playback_duration)
+        was_playing = self._playback_start is not None
+        sd.stop()
+        if self._playback_job is not None:
+            self.root.after_cancel(self._playback_job)
+            self._playback_job = None
+        self._playback_start = None
+        self._playback_elapsed = pos
+        if was_playing:
+            self._start_playback_from(pos)
+            self.play_btn.configure(text="⏸ Pausa")
+            self._playback_tick()
 
     def _highlight_current_line(self, elapsed: float) -> None:
         self.text.tag_remove("current_line", "1.0", tk.END)
