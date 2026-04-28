@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 import shutil
 import tempfile
 import threading
+import time
 import tkinter as tk
+import wave
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+import numpy as np
+import sounddevice as sd
 
 from .config import TRANSCRIPTS_DIR
 from .download_model import (
@@ -23,16 +29,21 @@ class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Transkribering")
-        self.root.geometry("780x560")
+        self.root.geometry("1280x700")
 
         self.recorder = Recorder()
         self.transcriber: Transcriber | None = None
         self.recording = False
         self.audio_path: Path | None = None
         self._devices: list[tuple[int, str]] = []
+        self._wav_paths: list[Path] = []
+        self._playback_start: float | None = None
+        self._playback_duration: float = 0.0
+        self._playback_job: str | None = None
 
         self._build_ui()
         self._refresh_devices()
+        self._refresh_file_list()
         self._ensure_model_on_startup()
 
     def _build_ui(self) -> None:
@@ -77,8 +88,50 @@ class App:
 
         ttk.Separator(frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
 
-        self.text = scrolledtext.ScrolledText(frame, wrap=tk.WORD, font=("Segoe UI", 11))
+        content_pane = ttk.PanedWindow(frame, orient=tk.HORIZONTAL)
+        content_pane.pack(fill=tk.BOTH, expand=True)
+        self.root.after(50, lambda: content_pane.sashpos(0, 320))
+
+        left_frame = ttk.Frame(content_pane, width=320)
+        content_pane.add(left_frame, weight=0)
+
+        list_header = ttk.Frame(left_frame)
+        list_header.pack(fill=tk.X)
+        ttk.Label(list_header, text="Inspelningar").pack(side=tk.LEFT)
+        ttk.Button(list_header, text="↻", width=3, command=self._refresh_file_list).pack(
+            side=tk.RIGHT
+        )
+
+        list_inner = ttk.Frame(left_frame)
+        list_inner.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        _sb = ttk.Scrollbar(list_inner, orient=tk.VERTICAL)
+        self.file_list = tk.Listbox(
+            list_inner,
+            yscrollcommand=_sb.set,
+            selectmode=tk.SINGLE,
+            activestyle="dotbox",
+            font=("Segoe UI", 9),
+        )
+        _sb.configure(command=self.file_list.yview)
+        _sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.file_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.file_list.bind("<<ListboxSelect>>", self._on_file_select)
+
+        play_row = ttk.Frame(left_frame)
+        play_row.pack(fill=tk.X, pady=(4, 0))
+        self.play_btn = ttk.Button(
+            play_row, text="▶ Spela upp", command=self._play_selected, state=tk.DISABLED
+        )
+        self.play_btn.pack(side=tk.LEFT)
+        self.time_label = ttk.Label(play_row, text="", font=("Segoe UI", 9))
+        self.time_label.pack(side=tk.LEFT, padx=(6, 0))
+
+        right_frame = ttk.Frame(content_pane)
+        content_pane.add(right_frame, weight=1)
+
+        self.text = scrolledtext.ScrolledText(right_frame, wrap=tk.WORD, font=("Segoe UI", 11))
         self.text.pack(fill=tk.BOTH, expand=True)
+        self.text.tag_configure("current_line", background="#fff3b0")
 
     def _refresh_devices(self) -> None:
         self._devices = list_input_devices()
@@ -191,6 +244,7 @@ class App:
             self.stop_and_transcribe()
 
     def start_recording(self) -> None:
+        self._stop_playback()
         device = self._selected_device_index()
         try:
             self.recorder.start(device=device)
@@ -342,12 +396,106 @@ class App:
                 print(f"[ui] failed to copy WAV to transcripts dir: {exc}")
         return out_path
 
+    def _refresh_file_list(self) -> None:
+        self._wav_paths: list[Path] = []
+        if TRANSCRIPTS_DIR.exists():
+            self._wav_paths = sorted(
+                TRANSCRIPTS_DIR.glob("*.wav"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        self.file_list.delete(0, tk.END)
+        for p in self._wav_paths:
+            marker = "" if (TRANSCRIPTS_DIR / (p.stem + ".txt")).exists() else " *"
+            self.file_list.insert(tk.END, p.stem + marker)
+
+    def _on_file_select(self, _event: object) -> None:
+        self._stop_playback()
+        sel = self.file_list.curselection()
+        if not sel:
+            return
+        wav_path = self._wav_paths[sel[0]]
+        txt_path = TRANSCRIPTS_DIR / (wav_path.stem + ".txt")
+        self.text.delete("1.0", tk.END)
+        if txt_path.exists():
+            self.text.insert("1.0", txt_path.read_text(encoding="utf-8"))
+            self.status_var.set(f"Visar: {txt_path.name}")
+        else:
+            self.status_var.set(f"Ingen transkription hittad for {wav_path.name}")
+        self.play_btn.configure(state=tk.NORMAL)
+
+    def _play_selected(self) -> None:
+        if self._playback_start is not None:
+            self._stop_playback()
+            return
+        sel = self.file_list.curselection()
+        if not sel:
+            return
+        wav_path = self._wav_paths[sel[0]]
+        try:
+            with wave.open(str(wav_path), "rb") as wf:
+                n_frames = wf.getnframes()
+                sr = wf.getframerate()
+                nc = wf.getnchannels()
+                sw = wf.getsampwidth()
+                frames = wf.readframes(n_frames)
+        except Exception as exc:
+            self.status_var.set(f"Uppspelningsfel: {exc}")
+            return
+        dtype = np.int16 if sw == 2 else np.int32
+        audio = np.frombuffer(frames, dtype=dtype)
+        if nc > 1:
+            audio = audio.reshape(-1, nc)
+        self._playback_duration = n_frames / sr
+        sd.play(audio, samplerate=sr)
+        self._playback_start = time.monotonic()
+        self.play_btn.configure(text="■ Stoppa")
+        self._playback_tick()
+
+    def _stop_playback(self) -> None:
+        sd.stop()
+        if self._playback_job is not None:
+            self.root.after_cancel(self._playback_job)
+            self._playback_job = None
+        self._playback_start = None
+        self.time_label.configure(text="")
+        self.text.tag_remove("current_line", "1.0", tk.END)
+        self.play_btn.configure(text="▶ Spela upp")
+
+    def _playback_tick(self) -> None:
+        if self._playback_start is None:
+            return
+        elapsed = time.monotonic() - self._playback_start
+        if elapsed >= self._playback_duration:
+            self._stop_playback()
+            return
+        self.time_label.configure(text=f"{_fmt(elapsed)} / {_fmt(self._playback_duration)}")
+        self._highlight_current_line(elapsed)
+        self._playback_job = self.root.after(100, self._playback_tick)
+
+    def _highlight_current_line(self, elapsed: float) -> None:
+        self.text.tag_remove("current_line", "1.0", tk.END)
+        content = self.text.get("1.0", tk.END)
+        for i, line in enumerate(content.splitlines(), start=1):
+            m = re.match(r"\[(\d+:\d+) -> (\d+:\d+)\]", line)
+            if not m:
+                continue
+            sm, ss = m.group(1).split(":")
+            em, es = m.group(2).split(":")
+            start = int(sm) * 60 + int(ss)
+            end = int(em) * 60 + int(es)
+            if start <= elapsed < end:
+                self.text.tag_add("current_line", f"{i}.0", f"{i}.end")
+                self.text.see(f"{i}.0")
+                return
+
     def _on_done(self, out_path: Path) -> None:
         self._spinner_stop()
         self.record_btn.configure(state=tk.NORMAL)
         self.file_btn.configure(state=tk.NORMAL)
         self.device_combo.configure(state="readonly")
         self.refresh_btn.configure(state=tk.NORMAL)
+        self._refresh_file_list()
         self.status_var.set(f"Sparad: {out_path}")
 
     def _on_error(self, err: str) -> None:
