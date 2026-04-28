@@ -1,6 +1,6 @@
 [project]
 name = "transcribe-app"
-version = "0.1.0"
+version = "0.1.1"
 description = "Simpel Transkriberings App (faster-whisper, Tkinter)"
 readme = "README.md"
 authors = [
