@@ -18,7 +18,7 @@ transcribe-app = "transcribe_app.main:main"
 download-model = "transcribe_app.download_model:main"
 
 [build-system]
-requires = ["uv_build>=0.11.6,<0.12.0"]
+requires = ["uv_build>=0.11.14,<0.12.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
