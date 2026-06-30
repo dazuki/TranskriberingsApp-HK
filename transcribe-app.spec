@@ -4,13 +4,16 @@ from PyInstaller.utils.hooks import collect_all
 fw_datas, fw_binaries, fw_hiddenimports = collect_all("faster_whisper")
 ct_datas, ct_binaries, ct_hiddenimports = collect_all("ctranslate2")
 sd_datas, sd_binaries, sd_hiddenimports = collect_all("sounddevice")
+# customtkinter ships theme JSON + assets that are not auto-discovered; without
+# collect_all the frozen exe crashes on launch trying to load its blue theme.
+ctk_datas, ctk_binaries, ctk_hiddenimports = collect_all("customtkinter")
 
 a = Analysis(
     ["entrypoint.py"],
     pathex=["src"],
-    binaries=fw_binaries + ct_binaries + sd_binaries,
-    datas=fw_datas + ct_datas + sd_datas,
-    hiddenimports=fw_hiddenimports + ct_hiddenimports + sd_hiddenimports,
+    binaries=fw_binaries + ct_binaries + sd_binaries + ctk_binaries,
+    datas=fw_datas + ct_datas + sd_datas + ctk_datas,
+    hiddenimports=fw_hiddenimports + ct_hiddenimports + sd_hiddenimports + ctk_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

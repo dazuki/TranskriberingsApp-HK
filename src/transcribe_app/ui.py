@@ -9,8 +9,9 @@ import time
 import tkinter as tk
 import wave
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox
 
+import customtkinter as ctk
 import numpy as np
 import sounddevice as sd
 
@@ -24,9 +25,16 @@ from .download_model import (
 from .recorder import Recorder, list_input_devices
 from .transcriber import Transcriber
 
+# Recording-list row colors (light/dark tuples; app forces light).
+SELECT_FG = ("#3B8ED0", "#1F6AA5")
+ROW_TEXT = ("gray10", "gray90")
+ROW_HOVER = ("gray85", "gray25")
+HIGHLIGHT_BG = "#fff3b0"
+NO_MIC_LABEL = "(ingen mikrofon)"
+
 
 class App:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: ctk.CTk) -> None:
         self.root = root
         self.root.title("Transkribering")
         self.root.geometry("1280x700")
@@ -37,6 +45,8 @@ class App:
         self.audio_path: Path | None = None
         self._devices: list[tuple[int, str]] = []
         self._wav_paths: list[Path] = []
+        self._row_buttons: list[ctk.CTkButton] = []
+        self._selected_index: int | None = None
         self._playback_audio: np.ndarray | None = None
         self._playback_sr: int = 16000
         self._playback_duration: float = 0.0
@@ -52,136 +62,135 @@ class App:
         self._ensure_model_on_startup()
 
     def _build_ui(self) -> None:
-        frame = ttk.Frame(self.root, padding=12)
-        frame.pack(fill=tk.BOTH, expand=True)
+        frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        frame.pack(fill="both", expand=True, padx=12, pady=12)
 
-        device_row = ttk.Frame(frame)
-        device_row.pack(fill=tk.X)
-        ttk.Label(device_row, text="Mikrofon:").pack(side=tk.LEFT)
+        device_row = ctk.CTkFrame(frame, fg_color="transparent")
+        device_row.pack(fill="x")
+        ctk.CTkLabel(device_row, text="Mikrofon:").pack(side="left")
         self.device_var = tk.StringVar()
-        self.device_combo = ttk.Combobox(
+        self.device_combo = ctk.CTkOptionMenu(
             device_row,
-            textvariable=self.device_var,
-            state="readonly",
-            width=60,
+            variable=self.device_var,
+            values=[NO_MIC_LABEL],
+            width=420,
         )
-        self.device_combo.pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
-        self.refresh_btn = ttk.Button(device_row, text="↻", width=3, command=self._refresh_devices)
-        self.refresh_btn.pack(side=tk.LEFT)
+        self.device_combo.pack(side="left", padx=6, fill="x", expand=True)
+        self.refresh_btn = ctk.CTkButton(
+            device_row, text="↻", width=36, command=self._refresh_devices
+        )
+        self.refresh_btn.pack(side="left")
 
-        controls = ttk.Frame(frame)
-        controls.pack(fill=tk.X, pady=(8, 0))
+        controls = ctk.CTkFrame(frame, fg_color="transparent")
+        controls.pack(fill="x", pady=(8, 0))
 
-        self.record_btn = ttk.Button(controls, text="● Spela in", command=self.toggle_record)
-        self.record_btn.pack(side=tk.LEFT)
+        self.record_btn = ctk.CTkButton(controls, text="● Spela in", command=self.toggle_record)
+        self.record_btn.pack(side="left")
 
-        self.file_btn = ttk.Button(
+        self.file_btn = ctk.CTkButton(
             controls,
             text="Välj ljudfil för transkribering...",
+            width=240,
             command=self.pick_file_and_transcribe,
         )
-        self.file_btn.pack(side=tk.LEFT, padx=(6, 0))
+        self.file_btn.pack(side="left", padx=(6, 0))
 
         self.status_var = tk.StringVar(value="Redo")
-        ttk.Label(controls, textvariable=self.status_var).pack(side=tk.LEFT, padx=12)
+        ctk.CTkLabel(controls, textvariable=self.status_var).pack(side="left", padx=12)
 
-        self.spinner_label = ttk.Label(controls, text="", font=("Consolas", 14), width=2)
-        self.spinner_label.pack(side=tk.RIGHT)
+        self.spinner_label = ctk.CTkLabel(
+            controls, text="", font=ctk.CTkFont(family="Consolas", size=14), width=30
+        )
+        self.spinner_label.pack(side="right")
         self._spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
         self._spinner_idx = 0
         self._spinner_job: str | None = None
 
-        ttk.Separator(frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
+        ctk.CTkFrame(frame, height=2, fg_color=("gray80", "gray30")).pack(fill="x", pady=8)
 
-        left_frame = ttk.Frame(frame, width=320)
-        left_frame.pack(side=tk.LEFT, fill=tk.Y)
+        body = ctk.CTkFrame(frame, fg_color="transparent")
+        body.pack(fill="both", expand=True)
+
+        left_frame = ctk.CTkFrame(body, width=320, fg_color="transparent")
+        left_frame.pack(side="left", fill="y")
         left_frame.pack_propagate(False)
 
-        ttk.Separator(frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
-
-        right_frame = ttk.Frame(frame)
-        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        list_header = ttk.Frame(left_frame)
-        list_header.pack(fill=tk.X)
-        ttk.Label(list_header, text="Inspelningar").pack(side=tk.LEFT)
-        ttk.Button(list_header, text="↻", width=3, command=self._refresh_file_list).pack(
-            side=tk.RIGHT
+        ctk.CTkFrame(body, width=2, fg_color=("gray80", "gray30")).pack(
+            side="left", fill="y", padx=4
         )
 
-        list_inner = ttk.Frame(left_frame)
-        list_inner.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
-        _sb = ttk.Scrollbar(list_inner, orient=tk.VERTICAL)
-        self.file_list = tk.Listbox(
-            list_inner,
-            yscrollcommand=_sb.set,
-            selectmode=tk.SINGLE,
-            activestyle="dotbox",
-            font=("Segoe UI", 9),
-        )
-        _sb.configure(command=self.file_list.yview)
-        _sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.file_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.file_list.bind("<<ListboxSelect>>", self._on_file_select)
+        right_frame = ctk.CTkFrame(body, fg_color="transparent")
+        right_frame.pack(side="left", fill="both", expand=True)
 
-        play_row = ttk.Frame(left_frame)
-        play_row.pack(fill=tk.X, pady=(4, 0))
-        self.play_btn = ttk.Button(
-            play_row, text="▶ Spela upp", command=self._play_selected, state=tk.DISABLED
+        list_header = ctk.CTkFrame(left_frame, fg_color="transparent")
+        list_header.pack(fill="x")
+        ctk.CTkLabel(list_header, text="Inspelningar").pack(side="left")
+        ctk.CTkButton(list_header, text="↻", width=36, command=self._refresh_file_list).pack(
+            side="right"
         )
-        self.play_btn.pack(side=tk.LEFT)
-        self.delete_btn = ttk.Button(
-            play_row, text="Ta bort", command=self._delete_selected, state=tk.DISABLED
+
+        self.file_list_frame = ctk.CTkScrollableFrame(left_frame, fg_color=("gray95", "gray14"))
+        self.file_list_frame.pack(fill="both", expand=True, pady=(4, 0))
+
+        play_row = ctk.CTkFrame(left_frame, fg_color="transparent")
+        play_row.pack(fill="x", pady=(4, 0))
+        self.play_btn = ctk.CTkButton(
+            play_row, text="▶ Spela upp", width=120, command=self._play_selected, state=tk.DISABLED
         )
-        self.delete_btn.pack(side=tk.LEFT, padx=(6, 0))
+        self.play_btn.pack(side="left")
+        self.delete_btn = ctk.CTkButton(
+            play_row, text="Ta bort", width=90, command=self._delete_selected, state=tk.DISABLED
+        )
+        self.delete_btn.pack(side="left", padx=(6, 0))
 
-        self.text = scrolledtext.ScrolledText(right_frame, wrap=tk.WORD, font=("Segoe UI", 11))
-        self.text.pack(fill=tk.BOTH, expand=True)
-        self.text.tag_configure("current_line", background="#fff3b0")
+        self.text = ctk.CTkTextbox(right_frame, wrap="word", font=ctk.CTkFont(size=13))
+        self.text.pack(fill="both", expand=True)
+        self.text.tag_config("current_line", background=HIGHLIGHT_BG, foreground="black")
 
-        seek_frame = ttk.Frame(right_frame)
-        seek_frame.pack(fill=tk.X, pady=(4, 0))
+        seek_frame = ctk.CTkFrame(right_frame, fg_color="transparent")
+        seek_frame.pack(fill="x", pady=(8, 0))
         self.seek_var = tk.DoubleVar(value=0.0)
-        self.seek_scale = ttk.Scale(
+        self.seek_scale = ctk.CTkSlider(
             seek_frame,
-            orient=tk.HORIZONTAL,
             variable=self.seek_var,
             from_=0,
             to=100,
             command=self._on_seek_drag,
             state=tk.DISABLED,
         )
-        self.seek_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.seek_scale.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.seek_scale.bind("<ButtonPress-1>", self._on_seek_press)
         self.seek_scale.bind("<ButtonRelease-1>", self._on_seek_release)
-        self.time_label = ttk.Label(
-            seek_frame, text="", font=("Segoe UI", 9), width=13, anchor=tk.E
+        self.time_label = ctk.CTkLabel(
+            seek_frame, text="", font=ctk.CTkFont(size=12), width=110, anchor="e"
         )
-        self.time_label.pack(side=tk.RIGHT)
+        self.time_label.pack(side="right")
 
     def _refresh_devices(self) -> None:
         self._devices = list_input_devices()
         labels = [label for _, label in self._devices]
-        self.device_combo.configure(values=labels)
         if not labels:
-            self.device_var.set("")
+            self.device_combo.configure(values=[NO_MIC_LABEL])
+            self.device_var.set(NO_MIC_LABEL)
             self.record_btn.configure(state=tk.DISABLED)
             self.status_var.set("Inga mikrofoner hittades")
             return
+        self.device_combo.configure(values=labels)
         self.record_btn.configure(state=tk.NORMAL)
         default_idx = next(
             (i for i, (_, label) in enumerate(self._devices) if "(default)" in label),
             0,
         )
-        self.device_combo.current(default_idx)
+        self.device_var.set(labels[default_idx])
 
     def _selected_device_index(self) -> int | None:
         if not self._devices:
             return None
-        i = self.device_combo.current()
-        if i < 0:
-            return None
-        return self._devices[i][0]
+        current = self.device_var.get()
+        for idx, label in self._devices:
+            if label == current:
+                return idx
+        return self._devices[0][0]
 
     def _ensure_model_on_startup(self) -> None:
         if is_model_present():
@@ -250,14 +259,14 @@ class App:
 
     def _on_model_download_done(self) -> None:
         self._spinner_stop()
-        self.device_combo.configure(state="readonly")
+        self.device_combo.configure(state=tk.NORMAL)
         self.refresh_btn.configure(state=tk.NORMAL)
         self._set_button_to_record_mode()
         self.status_var.set("Modell nedladdad - redo")
 
     def _on_model_download_error(self, title: str, body: str) -> None:
         self._spinner_stop()
-        self.device_combo.configure(state="readonly")
+        self.device_combo.configure(state=tk.NORMAL)
         self.refresh_btn.configure(state=tk.NORMAL)
         self._set_button_to_download_mode()
         self.status_var.set("Kunde inte ladda ner modellen")
@@ -302,7 +311,7 @@ class App:
             messagebox.showerror("Inspelningsfel", str(exc))
             self.record_btn.configure(state=tk.NORMAL)
             self.file_btn.configure(state=tk.NORMAL)
-            self.device_combo.configure(state="readonly")
+            self.device_combo.configure(state=tk.NORMAL)
             self.refresh_btn.configure(state=tk.NORMAL)
             self.status_var.set("Redo")
             return
@@ -322,7 +331,7 @@ class App:
             saved_path = self._keep_recording(self.audio_path)
             self.record_btn.configure(state=tk.NORMAL)
             self.file_btn.configure(state=tk.NORMAL)
-            self.device_combo.configure(state="readonly")
+            self.device_combo.configure(state=tk.NORMAL)
             self.refresh_btn.configure(state=tk.NORMAL)
             self._refresh_file_list()
             self._auto_select_stem(saved_path.stem)
@@ -432,27 +441,44 @@ class App:
         return out_path
 
     def _refresh_file_list(self) -> None:
-        self._wav_paths: list[Path] = []
+        self._stop_playback()
+        for btn in self._row_buttons:
+            btn.destroy()
+        self._row_buttons = []
+        self._selected_index = None
+        self._wav_paths = []
         if TRANSCRIPTS_DIR.exists():
             self._wav_paths = sorted(
                 TRANSCRIPTS_DIR.glob("*.wav"),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
-        self.file_list.delete(0, tk.END)
-        for p in self._wav_paths:
+        for i, p in enumerate(self._wav_paths):
             marker = "" if (TRANSCRIPTS_DIR / (p.stem + ".txt")).exists() else " *"
-            self.file_list.insert(tk.END, p.stem + marker)
+            btn = ctk.CTkButton(
+                self.file_list_frame,
+                text=p.stem + marker,
+                anchor="w",
+                fg_color="transparent",
+                text_color=ROW_TEXT,
+                hover_color=ROW_HOVER,
+                command=lambda idx=i: self._select_row(idx),
+            )
+            btn.pack(fill="x", padx=2, pady=1)
+            self._row_buttons.append(btn)
         self.play_btn.configure(state=tk.DISABLED)
         self.delete_btn.configure(state=tk.DISABLED)
         self.seek_scale.configure(state=tk.DISABLED)
 
-    def _on_file_select(self, _event: object) -> None:
+    def _select_row(self, index: int) -> None:
         self._stop_playback()
-        sel = self.file_list.curselection()
-        if not sel:
-            return
-        wav_path = self._wav_paths[sel[0]]
+        self._selected_index = index
+        for i, btn in enumerate(self._row_buttons):
+            if i == index:
+                btn.configure(fg_color=SELECT_FG, text_color="white", hover_color=SELECT_FG)
+            else:
+                btn.configure(fg_color="transparent", text_color=ROW_TEXT, hover_color=ROW_HOVER)
+        wav_path = self._wav_paths[index]
         txt_path = TRANSCRIPTS_DIR / (wav_path.stem + ".txt")
         self.text.delete("1.0", tk.END)
         if txt_path.exists():
@@ -465,10 +491,9 @@ class App:
         self.seek_scale.configure(state=tk.NORMAL)
 
     def _delete_selected(self) -> None:
-        sel = self.file_list.curselection()
-        if not sel:
+        if self._selected_index is None:
             return
-        wav_path = self._wav_paths[sel[0]]
+        wav_path = self._wav_paths[self._selected_index]
         txt_path = TRANSCRIPTS_DIR / (wav_path.stem + ".txt")
         if not messagebox.askyesno(
             "Ta bort inspelning",
@@ -507,10 +532,9 @@ class App:
             self.play_btn.configure(text="▶ Fortsätt")
             return
         # Fresh load
-        sel = self.file_list.curselection()
-        if not sel:
+        if self._selected_index is None:
             return
-        wav_path = self._wav_paths[sel[0]]
+        wav_path = self._wav_paths[self._selected_index]
         try:
             with wave.open(str(wav_path), "rb") as wf:
                 n_frames = wf.getnframes()
@@ -578,7 +602,7 @@ class App:
         self._highlight_current_line(pos)
         self._playback_job = self.root.after(100, self._playback_tick)
 
-    def _on_seek_drag(self, value: str) -> None:
+    def _on_seek_drag(self, value: float) -> None:
         if self._seek_dragging:
             self.time_label.configure(
                 text=f"{_fmt(float(value))} / {_fmt(self._playback_duration)}"
@@ -621,19 +645,14 @@ class App:
     def _auto_select_stem(self, stem: str) -> None:
         for i, p in enumerate(self._wav_paths):
             if p.stem == stem:
-                self.file_list.selection_clear(0, tk.END)
-                self.file_list.selection_set(i)
-                self.file_list.see(i)
-                self.play_btn.configure(state=tk.NORMAL)
-                self.delete_btn.configure(state=tk.NORMAL)
-                self.seek_scale.configure(state=tk.NORMAL)
+                self._select_row(i)
                 break
 
     def _on_done(self, out_path: Path) -> None:
         self._spinner_stop()
         self.record_btn.configure(state=tk.NORMAL)
         self.file_btn.configure(state=tk.NORMAL)
-        self.device_combo.configure(state="readonly")
+        self.device_combo.configure(state=tk.NORMAL)
         self.refresh_btn.configure(state=tk.NORMAL)
         self._refresh_file_list()
         self._auto_select_stem(out_path.stem)
@@ -643,7 +662,7 @@ class App:
         self._spinner_stop()
         self.record_btn.configure(state=tk.NORMAL)
         self.file_btn.configure(state=tk.NORMAL)
-        self.device_combo.configure(state="readonly")
+        self.device_combo.configure(state=tk.NORMAL)
         self.refresh_btn.configure(state=tk.NORMAL)
         self.status_var.set("Fel")
         messagebox.showerror("Transkriberingsfel", err)
@@ -742,6 +761,8 @@ def _classify_download_error(exc: Exception) -> tuple[str, str]:
 
 
 def run() -> None:
-    root = tk.Tk()
+    ctk.set_appearance_mode("light")
+    ctk.set_default_color_theme("blue")
+    root = ctk.CTk()
     App(root)
     root.mainloop()

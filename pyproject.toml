@@ -1,7 +1,7 @@
 [project]
 name = "transcribe-app"
 version = "0.1.1"
-description = "Simpel Transkriberings App (faster-whisper, Tkinter)"
+description = "Simpel Transkriberings App (faster-whisper, CustomTkinter)"
 readme = "README.md"
 authors = [
     { name = "Lars Lindberg", email = "lars.lindberg@herrljunga.se" }
@@ -11,6 +11,7 @@ dependencies = [
     "faster-whisper>=1.0.3",
     "sounddevice>=0.4.7",
     "numpy>=2.4.6",
+    "customtkinter>=5.2.2",
 ]
 
 [project.scripts]
