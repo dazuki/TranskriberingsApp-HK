@@ -762,7 +762,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "ruff", specifier = ">=0.15.14" }]
+dev = [{ name = "ruff", specifier = ">=0.15.20" }]
 
 [[package]]
 name = "typer"
